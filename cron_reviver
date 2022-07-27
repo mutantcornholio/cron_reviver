@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+
+set -eu -o pipefail
+
+usage_mode=check
+tmp_root="$(dirname "$(mktemp -d)")"
+log_path=
+pid_hash=
+pidfile_path=
+workdir=
+
+usage() {
+  echo 'Usage: reviver --execute command <args>'
+  echo
+  echo 'Simple script suitable for reviving services from crontab'
+  echo
+  echo 'Add "reviver your_command with arguments" to your crontab'
+  echo 'reviver checks if old process is still alive, and if not, it runs "reviver --execute"'
+  echo 'reviver --execute is a wrapper that goes "setsid", and stores its PID file, '
+  echo '     which is later checked by reviver'
+  echo
+  echo 'Your service must stay in foreground'
+  echo
+  echo 'Parameters:'
+  echo '    --workdir <path>        path to working directory of the application'
+  echo '    --execute               work in execution mode; not for external use'
+  echo
+  echo 'Examples:'
+  echo '    reviver python server.py'
+  echo '    reviver nc -k -l 9957'
+  echo
+}
+
+check() {
+  if [ -f "$pidfile_path" ]; then
+    if kill -0 "$(cat "$pidfile_path")" &> /dev/null; then
+      echo "Service is alive"
+      exit 0
+    fi
+  fi
+
+  echo "Service is not alive; starting"
+
+  args=("${BASH_SOURCE[0]}" --execute)
+
+  if [ -n "$workdir" ]; then
+    args+=("--workdir" "$workdir")
+  fi
+
+  args+=("${@}")
+  setsid "${args[@]}" &
+
+  echo "Started! PID file is: ${pidfile_path}; Logs are collected at ${log_path}"
+}
+
+execute() {
+  reviver_pid=$$
+
+  if [ -n "$workdir" ]; then
+    cd "$workdir"
+  fi
+
+  echo "$reviver_pid" > "$pidfile_path"
+
+  "${@}" &> "$log_path"
+}
+
+main() {
+  # using hash of command and arguments to name the pidfile safely
+  pid_hash="$(echo "${@}" | md5sum | awk '{ print $1 }')"
+  pidfile_path="${tmp_root}/reviver-${pid_hash}.pid"
+  log_path="${tmp_root}/${pid_hash}-stdouterr.log"
+
+  if [ "$usage_mode" = "check" ]; then
+    check "${@}"
+  else
+    execute "${@}"
+  fi
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+  --help)
+    usage
+    exit
+    ;;
+  --execute)
+    usage_mode="execute"
+    shift
+    ;;
+  --workdir)
+    workdir="$2"
+    shift
+    shift
+    ;;
+  *)
+    break
+    ;;
+  esac
+done
+
+main "${@}"
